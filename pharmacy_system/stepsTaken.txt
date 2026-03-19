@@ -1,0 +1,367 @@
+========================================================
+  PROJECT 3 — STEPS TAKEN LOG
+  Base project: pharmacy_system (Project 2)
+========================================================
+
+This file tracks every change made to the original pharmacy_system project
+as part of Project 3. Each entry lists what was changed, why, and what file
+was affected. Entries are in chronological order.
+
+Legend:
+  [ENV]    Environment / setup change (not source code)
+  [YAML]   docker-compose.yml change
+  [CONF]   Configuration file change
+  [PY]     Python source code change
+  [PROTO]  .proto file change
+  [NEW]    New file created
+
+----------------------------------------------------------
+STEP 1 [ENV] — Python virtual environment created
+----------------------------------------------------------
+Problem:
+  macOS Homebrew Python 3.14 blocks system-wide pip installs (PEP 668).
+  Running `python client/test_client.py` failed with "No module named grpc".
+  The pinned versions in requirements.txt (grpcio==1.62.0) also fail to
+  build from source on Python 3.14.
+
+Fix:
+  Created a virtual environment inside the project directory:
+    python3 -m venv .venv
+    source .venv/bin/activate
+
+  Installed compatible (unpinned) versions of all dependencies:
+    pip install grpcio grpcio-tools          # 1.78.0 — works on Python 3.14
+    pip install requests matplotlib psycopg2-binary
+
+  Regenerated proto stubs using the venv's grpc_tools:
+    python -m grpc_tools.protoc -I./proto \
+        --python_out=./proto \
+        --grpc_python_out=./proto \
+        ./proto/pharmacy.proto
+
+Files affected:
+  .venv/                         (new directory, not committed to git)
+  proto/pharmacy_pb2.py          (regenerated)
+  proto/pharmacy_pb2_grpc.py     (regenerated)
+
+Notes:
+  Always activate the venv before running any Python scripts locally:
+    source .venv/bin/activate
+  Docker containers handle their own pip installs and are not affected.
+
+
+----------------------------------------------------------
+STEP 2 [ENV] — Fixed generate_proto.sh for Python 3.14
+----------------------------------------------------------
+Problem:
+  generate_proto.sh called `python` and `pip`, which do not exist on this
+  machine (only `python3` and `pip3` are available).
+
+Fix:
+  Changed line in generate_proto.sh:
+    pip install grpcio-tools --quiet
+      → pip3 install grpcio-tools --quiet
+    python -m grpc_tools.protoc ...
+      → python3 -m grpc_tools.protoc ...
+
+Files affected:
+  generate_proto.sh
+
+
+----------------------------------------------------------
+STEP 3 [YAML] — Scaled API server pool from 2 to 5 nodes
+----------------------------------------------------------
+Reason:
+  The assignment requires at least 5 containerized nodes communicating
+  with each other for both 2PC (Q1/Q2) and Raft (Q3/Q4).
+  The original project only had 2 API server containers (node2, node3).
+
+Changes made to docker-compose.yml:
+  1. Added NODE_ID environment variable to api-server-a (NODE_ID=1)
+     and api-server-b (NODE_ID=2). NODE_ID is used by the 2PC coordinator/
+     participant logic and Raft state machine to identify each node in all
+     required protocol print statements.
+
+  2. Added three new services that reuse the exact same Dockerfile
+     (node2_api_server/Dockerfile) as the original two servers:
+       api-server-c  →  container node7-api-server-c  (NODE_ID=3)
+       api-server-d  →  container node8-api-server-d  (NODE_ID=4)
+       api-server-e  →  container node9-api-server-e  (NODE_ID=5)
+
+  3. Added api-server-c/d/e to the nginx-lb depends_on list so NGINX
+     waits for all 5 servers before accepting traffic.
+
+Files affected:
+  docker-compose.yml
+
+
+----------------------------------------------------------
+STEP 4 [CONF] — Expanded NGINX upstream to all 5 servers
+----------------------------------------------------------
+Reason:
+  NGINX was previously only load-balancing across api-server-a and
+  api-server-b. The 3 new servers need to be included in the upstream pool
+  so all 5 nodes receive traffic and can be tested.
+
+Change made to node1_nginx/nginx.conf:
+  upstream grpc_servers block updated from 2 entries to 5:
+    server api-server-c:50051;
+    server api-server-d:50051;
+    server api-server-e:50051;
+  (added alongside the existing a and b entries)
+
+Files affected:
+  node1_nginx/nginx.conf
+
+
+----------------------------------------------------------
+STEP 5 [PY] — Added comments and NODE_ID to server.py
+----------------------------------------------------------
+Reason:
+  The original server.py had no header documentation. We need a clear
+  boundary between the original project code and our additions so the
+  professor and partner can immediately identify what we wrote.
+
+Changes made to node2_api_server/server.py:
+  1. Added a top-of-file block comment that:
+     - Credits the original project and lists its RPCs
+     - States that our additions are marked with "# [PROJECT 3]"
+     - Lists what we will be adding (coordinator.py, raft_node.py)
+
+  2. Added NODE_ID variable below the existing DB env vars:
+       NODE_ID = int(os.environ.get("NODE_ID", "0"))
+     Tagged with "# [PROJECT 3]" comment explaining its purpose.
+
+Files affected:
+  node2_api_server/server.py
+
+
+----------------------------------------------------------
+STEP 6 [PROTO] — Extended pharmacy.proto with 2PC services (Q1 + Q2)
+----------------------------------------------------------
+Reason:
+  Q1 requires a vote-phase RPC and Q2 requires a decision-phase RPC.
+  Both are defined in the same proto file as stated in the assignment.
+
+Changes made to proto/pharmacy.proto:
+  Added service TwoPhaseParticipantService with three RPCs:
+    VoteRequest(VoteRequestMsg) returns (VoteResponseMsg)   — Q1 vote phase
+    GlobalCommit(GlobalDecisionMsg) returns (GlobalDecisionAck) — Q2 commit
+    GlobalAbort(GlobalDecisionMsg) returns (GlobalDecisionAck)  — Q2 abort
+
+  Added service CoordinatorService with one RPC:
+    UpdateStock2PC(UpdateStockRequest) returns (DrugResponse)
+    (reuses existing message types; exposes 2PC to external clients)
+
+  Added 4 new message types:
+    VoteRequestMsg      — transaction_id, drug_id, new_quantity, coordinator_id
+    VoteResponseMsg     — transaction_id, participant_id, vote_commit (bool), reason
+    GlobalDecisionMsg   — transaction_id, coordinator_id, drug_id, new_quantity
+    GlobalDecisionAck   — transaction_id, participant_id, success (bool), message
+
+Files affected:
+  proto/pharmacy.proto
+
+Note:
+  Proto stubs must be regenerated locally before running twopc_client.py:
+    source .venv/bin/activate
+    python -m grpc_tools.protoc -I./proto \
+        --python_out=./proto \
+        --grpc_python_out=./proto \
+        ./proto/pharmacy.proto
+  Docker build auto-regenerates inside the container.
+
+
+----------------------------------------------------------
+STEP 7 [NEW] — Created participant.py (TwoPhaseParticipantServicer)
+----------------------------------------------------------
+File: node2_api_server/participant.py
+
+Implements the PARTICIPANT side of 2PC. Runs as a gRPC service on port 50052
+on ALL 5 API server containers.
+
+Q1 — VoteRequest:
+  - Connects to PostgreSQL to check if drug_id exists
+  - If found: stores (drug_id, new_quantity) in _pending_transactions dict,
+    replies VoteCommit
+  - If not found: replies VoteAbort with reason "Drug X not found"
+  - Thread-safe dict updates via threading.Lock
+
+Q2 — GlobalCommit:
+  - Node 1 (coordinator node, request.coordinator_id == NODE_ID) applies
+    the actual DB UPDATE to avoid 5 duplicate writes on the shared PostgreSQL
+  - Other nodes log "locally committed" without touching the DB
+  - Removes pending transaction from dict
+
+Q2 — GlobalAbort:
+  - All nodes discard the pending transaction (no DB write)
+
+Required print statement format (both phases):
+  Client-side:  "Phase decision of Node X sends RPC <rpc> to Phase voting of Node Y"
+  Server-side:  "Phase voting of Node Y sends RPC <rpc_response> to Phase decision of Node X"
+
+
+----------------------------------------------------------
+STEP 8 [NEW] — Created coordinator.py (CoordinatorServicer)
+----------------------------------------------------------
+File: node2_api_server/coordinator.py
+
+Implements the COORDINATOR side of 2PC. Started as an additional gRPC server
+on port 50053 ONLY on Node 1 (api-server-a, NODE_ID=1). Nodes 2–5 do not start
+this service.
+
+On receiving UpdateStock2PC from a client:
+  1. Generates a short UUID as transaction_id
+  2. Q1 — Vote Phase: sends VoteRequest to all 5 participants
+       Node 1 self-call: coordinator → localhost:50052 (demonstrates intra-node gRPC)
+       Nodes 2-5: coordinator → api-server-b/c/d/e:50052
+  3. Q2 — Decision Phase:
+       All voted COMMIT → sends GlobalCommit to all 5 participants
+       Any voted ABORT  → sends GlobalAbort to all 5 participants (with reason)
+  4. Returns DrugResponse to client
+
+serve_coordinator() is a non-blocking helper called from server.py when NODE_ID==1.
+
+PARTICIPANTS list:
+  [(1, "localhost"), (2, "api-server-b"), (3, "api-server-c"),
+   (4, "api-server-d"), (5, "api-server-e")]
+
+
+----------------------------------------------------------
+STEP 9 [PY] — Updated server.py serve() for 2PC services
+----------------------------------------------------------
+File: node2_api_server/server.py
+
+Added to serve() function (all tagged [PROJECT 3]):
+  1. Imports TwoPhaseParticipantServicer from participant.py
+     Starts participant gRPC server on port 50052 (all 5 nodes)
+
+  2. If NODE_ID == 1: imports serve_coordinator from coordinator.py
+     Starts coordinator gRPC server on port 50053 (Node 1 only)
+     Returns non-blocking server; main thread blocks on pharmacy_server.
+
+
+----------------------------------------------------------
+STEP 10 [YAML] — Updated Dockerfile and docker-compose for 2PC
+----------------------------------------------------------
+Files: node2_api_server/Dockerfile, docker-compose.yml
+
+Dockerfile changes:
+  COPY node2_api_server/participant.py /app/participant.py
+  COPY node2_api_server/coordinator.py /app/coordinator.py
+  EXPOSE 50051 50052 50053  (added 50052 and 50053)
+
+docker-compose.yml changes (api-server-a section):
+  Added ports mapping:
+    - "50053:50053"   # CoordinatorService — 2PC entry point for test clients
+
+Note: port 50052 is NOT exposed to the host; it is internal Docker-network
+communication only. Only 50053 needs to be accessible from localhost for the
+test client.
+
+
+----------------------------------------------------------
+STEP 11 [NEW] — Created twopc_client.py
+----------------------------------------------------------
+File: client/twopc_client.py
+
+Test client for the 2PC protocol. Connects directly to the CoordinatorService
+on localhost:50053 (bypasses NGINX, which only handles port 50051 PharmacyService).
+
+Test 1 — Happy path:
+  UpdateStock2PC(drug_id=1, new_quantity=250)
+  Expected: all 5 nodes vote COMMIT → GlobalCommit → DB updated
+  Verify with: python client/test_client.py  (check drug 1 quantity = 250)
+
+Test 2 — Abort path:
+  UpdateStock2PC(drug_id=9999, new_quantity=1)
+  Expected: all 5 nodes vote ABORT (drug 9999 not found) → GlobalAbort sent
+  DB remains unchanged.
+
+Usage:
+  source .venv/bin/activate
+  python3 client/test_client.py        # add drugs to DB first
+  python3 client/twopc_client.py       # run 2PC tests
+
+
+----------------------------------------------------------
+STEP 12 [PY] — Fixed coordinator GC bug in server.py
+----------------------------------------------------------
+File: node2_api_server/server.py
+
+Problem:
+  serve_coordinator() starts the gRPC server and returns it, but the
+  return value was not stored. CPython's reference counting immediately
+  garbage-collects the server object once the function returns, which tears
+  down the listening socket. Port 50053 would appear bound for ~1 second
+  then close, causing UNAVAILABLE / "Connection reset by peer" errors
+  from any client trying to connect.
+
+Fix:
+  Changed:      serve_coordinator()
+  To:           coord_server = serve_coordinator()
+
+  Assigning to a local variable in serve() keeps the object alive for the
+  entire lifetime of the process (serve() blocks forever on
+  pharmacy_server.wait_for_termination()).
+
+
+----------------------------------------------------------
+STEP 13 [CONF] — Added PYTHONUNBUFFERED=1 to Dockerfile
+----------------------------------------------------------
+File: node2_api_server/Dockerfile
+
+Problem:
+  Python line-buffers stdout when its output is not a TTY (standard inside
+  Docker). All print() calls from coordinator.py and participant.py were
+  held in a buffer and never flushed, so `docker logs` showed nothing.
+
+Fix:
+  Added ENV PYTHONUNBUFFERED=1 to the Dockerfile. This forces Python to
+  flush stdout immediately, making all Phase/2PC print statements visible
+  in `docker logs` in real-time.
+
+
+----------------------------------------------------------
+STEP 14 [VERIFIED] — End-to-end 2PC test passes (Q1 + Q2)
+----------------------------------------------------------
+Confirmed working output from docker logs node2-api-server-a:
+
+  [2PC] Coordinator Node 1 — Transaction EDAE4F59
+  Phase decision of Node 1 sends RPC VoteRequest to Phase voting of Node 1
+  Phase voting of Node 1 sends RPC VoteCommit to Phase decision of Node 1
+  Phase decision of Node 1 sends RPC VoteRequest to Phase voting of Node 2
+  ... (Nodes 3/4/5 also vote COMMIT)
+  Phase decision of Node 1 sends RPC GlobalCommit to Phase voting of Node 1
+  [2PC] Node 1 applied DB UPDATE: drug 1 qty → 250
+  [2PC] Decision phase complete — 5/5 ACKs received
+
+  [2PC] Coordinator Node 1 — Transaction EB649F2F
+  Phase voting of Node 1 sends RPC VoteAbort to Phase decision of Node 1
+  ... (all 5 nodes vote ABORT: Drug 9999 not found)
+  Phase decision of Node 1 sends RPC GlobalAbort to Phase voting of Node 1
+  [2PC] Decision phase complete — 5/5 ACKs received
+
+All required print statement formats confirmed for Q1 and Q2.
+
+
+----------------------------------------------------------
+PENDING — NEXT STEPS
+----------------------------------------------------------
+
+[ ] Q3 — Create raft.proto with RequestVote and AppendEntries RPCs.
+
+[ ] Q3 — Create raft_node.py with Follower/Candidate/Leader state machine,
+          1s heartbeat timeout, random 1.5–3s election timeout.
+
+[ ] Q4 — Extend AppendEntries to carry log entries.
+          Implement client-to-leader forwarding.
+          Implement majority-ACK commit and log execution.
+
+[ ] Q5 — Design and run 5 failure test cases. Capture screenshots.
+
+[ ] Final — Update README, write report.
+
+----------------------------------------------------------
+END OF LOG
+----------------------------------------------------------

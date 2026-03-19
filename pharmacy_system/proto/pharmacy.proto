@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package pharmacy;
+
+// =========================================================================
+// ORIGINAL: PharmacyService — defined by the base project group (Project 2)
+// =========================================================================
+service PharmacyService {
+  rpc AddDrug(AddDrugRequest) returns (DrugResponse);
+  rpc GetDrug(GetDrugRequest) returns (DrugResponse);
+  rpc UpdateStock(UpdateStockRequest) returns (DrugResponse);
+  rpc DeleteDrug(DeleteDrugRequest) returns (DeleteResponse);
+  rpc ListDrugs(ListDrugsRequest) returns (ListDrugsResponse);
+  rpc GetLowStock(LowStockRequest) returns (ListDrugsResponse);
+}
+
+message Drug {
+  int32 id = 1;
+  string name = 2;
+  int32 quantity = 3;
+  float price = 4;
+  string expiry_date = 5;
+  string category = 6;
+}
+
+message AddDrugRequest {
+  string name = 1;
+  int32 quantity = 2;
+  float price = 3;
+  string expiry_date = 4;
+  string category = 5;
+}
+
+message GetDrugRequest {
+  int32 id = 1;
+}
+
+message UpdateStockRequest {
+  int32 id = 1;
+  int32 quantity = 2;
+}
+
+message DeleteDrugRequest {
+  int32 id = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListDrugsRequest {}
+
+message LowStockRequest {
+  int32 threshold = 1;
+}
+
+message ListDrugsResponse {
+  repeated Drug drugs = 1;
+}
+
+message DrugResponse {
+  bool success = 1;
+  string message = 2;
+  Drug drug = 3;
+}
+
+// =========================================================================
+// [PROJECT 3] TWO-PHASE COMMIT PROTOCOL — Q1 (Vote Phase) + Q2 (Decision Phase)
+//
+// Architecture:
+//   TwoPhaseParticipantService — runs on ALL 5 nodes on port 50052
+//     VoteRequest  : coordinator asks each participant "can you commit?" (Q1)
+//     GlobalCommit : coordinator tells all participants to locally commit  (Q2)
+//     GlobalAbort  : coordinator tells all participants to locally abort   (Q2)
+//
+//   CoordinatorService — runs ONLY on Node 1 (api-server-a) on port 50053
+//     UpdateStock2PC : client calls this to trigger a full 2PC UpdateStock
+//
+// The coordinator (decision phase) drives the protocol by calling each
+// participant's VoteRequest/GlobalCommit/GlobalAbort via gRPC — including
+// calling its OWN participant service on localhost:50052, satisfying the
+// assignment requirement that voting and decision phases on the same node
+// communicate over gRPC even within the same container.
+// =========================================================================
+
+// Participant service: handles vote and decision RPCs on all 5 nodes
+service TwoPhaseParticipantService {
+  // Q1 — Vote phase: coordinator sends proposed UpdateStock, participant votes
+  rpc VoteRequest(VoteRequestMsg) returns (VoteResponseMsg);
+
+  // Q2 — Decision phase: coordinator delivers the global commit or abort
+  rpc GlobalCommit(GlobalDecisionMsg) returns (GlobalDecisionAck);
+  rpc GlobalAbort(GlobalDecisionMsg) returns (GlobalDecisionAck);
+}
+
+// Coordinator service: receives UpdateStock2PC from a client and drives 2PC
+service CoordinatorService {
+  rpc UpdateStock2PC(UpdateStockRequest) returns (DrugResponse);
+}
+
+// -- Vote Phase Messages (Q1) --
+
+// Coordinator → each Participant: proposed stock update to vote on
+message VoteRequestMsg {
+  string transaction_id = 1;  // unique ID for this 2PC transaction
+  int32  drug_id        = 2;  // which drug to update
+  int32  new_quantity   = 3;  // proposed new stock quantity
+  int32  coordinator_id = 4;  // NODE_ID of the coordinator (for logging)
+}
+
+// Participant → Coordinator: vote result
+message VoteResponseMsg {
+  string transaction_id = 1;
+  int32  participant_id = 2;  // NODE_ID of this participant
+  bool   vote_commit    = 3;  // true = COMMIT, false = ABORT
+  string reason         = 4;  // e.g. "Drug found, ready to commit" or "Drug not found"
+}
+
+// -- Decision Phase Messages (Q2) --
+
+// Coordinator → each Participant: global decision after all votes collected
+message GlobalDecisionMsg {
+  string transaction_id = 1;
+  int32  coordinator_id = 2;
+  int32  drug_id        = 3;  // included so participants can log the operation
+  int32  new_quantity   = 4;  // included for the node that applies the DB write
+}
+
+// Participant → Coordinator: acknowledgement of local commit or abort
+message GlobalDecisionAck {
+  string transaction_id = 1;
+  int32  participant_id = 2;
+  bool   success        = 3;
+  string message        = 4;
+}

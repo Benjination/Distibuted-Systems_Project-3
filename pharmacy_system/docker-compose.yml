@@ -1,0 +1,223 @@
+# =============================================================================
+# ORIGINAL PROJECT INFRASTRUCTURE (from pharmacy_system, Project 2)
+# network "pharmacy-net" connects all gRPC nodes
+# network "mono-net" isolates the REST monolith comparison app
+# =============================================================================
+networks:
+  pharmacy-net:
+    driver: bridge
+  mono-net:
+    driver: bridge
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # ORIGINAL: NGINX load balancer (node1)
+  # Receives all inbound gRPC traffic on port 8080 and round-robins it across
+  # the API server pool. Updated by us to include all 5 API servers so that
+  # both 2PC and Raft have a full 5-node cluster behind the load balancer.
+  # ---------------------------------------------------------------------------
+  nginx-lb:
+    build: ./node1_nginx
+    container_name: node1-nginx-lb
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api-server-a
+      - api-server-b
+      # PROJECT 3 ADDITION: three new participant nodes added to reach the
+      # minimum 5-node requirement for both 2PC and Raft.
+      - api-server-c
+      - api-server-d
+      - api-server-e
+    networks:
+      - pharmacy-net
+
+  # ---------------------------------------------------------------------------
+  # ORIGINAL: API Server A (node2) — existed in the base project.
+  # PROJECT 3 CHANGE: added NODE_ID=1 and exposed port 50053 for the
+  # CoordinatorService so the test client can call UpdateStock2PC directly.
+  # ---------------------------------------------------------------------------
+  api-server-a:
+    build:
+      context: .
+      dockerfile: node2_api_server/Dockerfile
+    container_name: node2-api-server-a
+    environment:
+      - NODE_ID=1   # used by 2PC coordinator/participant logic and Raft state machine
+      - DB_HOST=db-primary
+      - DB_PORT=5432
+      - DB_NAME=pharmacy
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    ports:
+      - "50053:50053"  # [PROJECT 3] CoordinatorService — 2PC entry point for clients
+    depends_on:
+      - db-primary
+    networks:
+      - pharmacy-net
+
+  # ---------------------------------------------------------------------------
+  # ORIGINAL: API Server B (node3) — existed in the base project.
+  # PROJECT 3 CHANGE: added NODE_ID=2.
+  # ---------------------------------------------------------------------------
+  api-server-b:
+    build:
+      context: .
+      dockerfile: node2_api_server/Dockerfile
+    container_name: node3-api-server-b
+    environment:
+      - NODE_ID=2
+      - DB_HOST=db-primary
+      - DB_PORT=5432
+      - DB_NAME=pharmacy
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      - db-primary
+    networks:
+      - pharmacy-net
+
+  # ---------------------------------------------------------------------------
+  # PROJECT 3 ADDITION: API Server C (node7)
+  # Identical image to nodes A and B — reuses node2_api_server/Dockerfile.
+  # Acts as a 2PC participant (votes on UpdateStock transactions) and as a
+  # Raft follower/candidate/leader depending on election outcome.
+  # NODE_ID=3 distinguishes it in all protocol print statements.
+  # ---------------------------------------------------------------------------
+  api-server-c:
+    build:
+      context: .
+      dockerfile: node2_api_server/Dockerfile
+    container_name: node7-api-server-c
+    environment:
+      - NODE_ID=3
+      - DB_HOST=db-primary
+      - DB_PORT=5432
+      - DB_NAME=pharmacy
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      - db-primary
+    networks:
+      - pharmacy-net
+
+  # ---------------------------------------------------------------------------
+  # PROJECT 3 ADDITION: API Server D (node8)
+  # Same role as node C. NODE_ID=4.
+  # ---------------------------------------------------------------------------
+  api-server-d:
+    build:
+      context: .
+      dockerfile: node2_api_server/Dockerfile
+    container_name: node8-api-server-d
+    environment:
+      - NODE_ID=4
+      - DB_HOST=db-primary
+      - DB_PORT=5432
+      - DB_NAME=pharmacy
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      - db-primary
+    networks:
+      - pharmacy-net
+
+  # ---------------------------------------------------------------------------
+  # PROJECT 3 ADDITION: API Server E (node9)
+  # Same role as nodes C and D. NODE_ID=5.
+  # Together with A and B, nodes A-E form the 5-node cluster required for
+  # both 2PC (Q1/Q2) and Raft leader election + log replication (Q3/Q4).
+  # ---------------------------------------------------------------------------
+  api-server-e:
+    build:
+      context: .
+      dockerfile: node2_api_server/Dockerfile
+    container_name: node9-api-server-e
+    environment:
+      - NODE_ID=5
+      - DB_HOST=db-primary
+      - DB_PORT=5432
+      - DB_NAME=pharmacy
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      - db-primary
+    networks:
+      - pharmacy-net
+
+  db-primary:
+    build: ./node4_db_primary
+    container_name: node4-db-primary
+    environment:
+      - POSTGRES_DB=pharmacy
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-primary-data:/var/lib/postgresql/data
+    networks:
+      - pharmacy-net
+
+  db-replica:
+    image: postgres:15
+    container_name: node5-db-replica
+    environment:
+      - POSTGRES_DB=pharmacy
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - PGUSER=postgres
+    depends_on:
+      - db-primary
+    ports:
+      - "5433:5432"
+    volumes:
+      - db-replica-data:/var/lib/postgresql/data
+    networks:
+      - pharmacy-net
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: node6-pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@pharmacy.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db-primary
+    networks:
+      - pharmacy-net
+
+  monolith-api:
+    build: ./monolith_rest
+    container_name: monolith-rest-api
+    environment:
+      - DB_HOST=db-mono
+      - DB_NAME=pharmacy
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    ports:
+      - "9000:8000"
+    depends_on:
+      - db-mono
+    networks:
+      - mono-net
+
+  db-mono:
+    image: postgres:15
+    container_name: mono-db
+    environment:
+      - POSTGRES_DB=pharmacy
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - db-mono-data:/var/lib/postgresql/data
+    networks:
+      - mono-net
+
+volumes:
+  db-primary-data:
+  db-replica-data:
+  db-mono-data:
